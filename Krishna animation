@@ -1,0 +1,356 @@
+/**
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ *  Krishna Muralidhara — Devotional Animation  v3.1  (stutter-fixed)
+ *  ESP32 · SSD1306 128×64 portrait-mounted · Adafruit_SSD1306
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ *
+ *  BUG-FIX LOG  (v3.0 → v3.1)
+ *  ────────────────────────────
+ *  BUG 1 — Vertical jumping (PRIMARY stutter cause)
+ *    Cause: breatheY used (int) truncation on a [-0.8, +0.8] value.
+ *           C truncates toward zero, so (int)(-0.7f) = 0, not -1.
+ *           subpixelDither then toggled the whole figure ±1 px every frame
+ *           → 25 Hz vertical strobe visible to the eye.
+ *    Fix:   Removed breathe Y entirely. A 0.8 px vertical oscillation is
+ *           imperceptible on OLED — it only manufactured noise.
+ *
+ *  BUG 2 — Horizontal shimmer / edge noise (SECONDARY stutter cause)
+ *    Cause: subpixelDither() toggled per-column pixels at 25 Hz.
+ *           On a 1-bit OLED this is full-brightness flicker, not smoothing.
+ *           "Sub-pixel dithering" is a concept for LCD subpixels; it does
+ *           not apply to monochrome OLEDs.
+ *    Fix:   Removed subpixelDither entirely. Integer rounding via
+ *           lroundf() gives cleaner steps than frame-alternating dither.
+ *
+ *  BUG 3 — Feather tip jumping independently
+ *    Cause: Separate integer feather offset snapped between 0/±1
+ *           on its own phase, creating a visible independent twitch.
+ *    Fix:   Feather sway is now blended into body leverage continuously
+ *           (weighted additive float) — single lroundf() at the end.
+ *           No separate integer step.
+ *
+ *  WHAT REMAINS FROM v3.0
+ *  ────────────────────────
+ *  ✓ Delta-time animation (frame-rate independent)
+ *  ✓ Phase wrapping (no float drift)
+ *  ✓ DT cap (guards against I²C stalls)
+ *  ✓ sinf() pre-computed once per frame
+ *  ✓ Wire.setClock(400000) for max FPS
+ *  ✓ setRotation(1) portrait mode
+ *  ✓ 50 FPS spin-wait with micros()
+ *  ✓ 1.7× bitmap (39×107 px, LANCZOS + sharpened)
+ *
+ *  WIRING
+ *  ───────
+ *  SDA → GPIO 21   SCL → GPIO 22   VCC → 3.3V   GND → GND
+ */
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <math.h>
+
+// ═══════════════════════════════════════════════════════════════
+//  HARDWARE
+// ═══════════════════════════════════════════════════════════════
+#define OLED_HW_W   128
+#define OLED_HW_H    64
+#define OLED_ADDR   0x3C
+#define OLED_RESET   -1
+#define I2C_FREQ    400000UL   // Fast-Mode — do not lower this
+
+// Logical canvas after setRotation(1)
+#define CANVAS_W     64
+#define CANVAS_H    128
+
+Adafruit_SSD1306 oled(OLED_HW_W, OLED_HW_H, &Wire, OLED_RESET);
+
+// ═══════════════════════════════════════════════════════════════
+//  TIMING
+// ═══════════════════════════════════════════════════════════════
+#define TARGET_FPS   50
+#define FRAME_US     (1000000UL / TARGET_FPS)   // 20 000 µs
+
+// ═══════════════════════════════════════════════════════════════
+//  BITMAP  —  39 × 107 px  |  5 bytes/row  |  535 bytes PROGMEM
+//  LANCZOS downscale + UnsharpMask from source silhouette @ 1.7×
+//  Row 0 = feather tip   |   Row 106 = toe base
+// ═══════════════════════════════════════════════════════════════
+#define BMP_W    39
+#define BMP_H   107
+#define BMP_BPR   5
+
+static const uint8_t PROGMEM krishna_bmp[BMP_H][BMP_BPR] = {
+  {0x00, 0x18, 0x00, 0x00, 0x00},  //   0  feather tip
+  {0x00, 0x0F, 0xC0, 0x00, 0x00},  //   1
+  {0x00, 0x0F, 0xF0, 0x00, 0x00},  //   2
+  {0x00, 0x0F, 0xF8, 0x00, 0x00},  //   3  feather / hair bun
+  {0x00, 0x0F, 0xF8, 0x00, 0x00},  //   4
+  {0x00, 0x07, 0xF8, 0xC0, 0x00},  //   5
+  {0x00, 0x07, 0xF9, 0xFC, 0x00},  //   6
+  {0x00, 0x03, 0xFB, 0xFE, 0x00},  //   7
+  {0x00, 0x01, 0xFF, 0xFF, 0x80},  //   8
+  {0x00, 0x00, 0x0F, 0xFF, 0x80},  //   9
+  {0x00, 0x00, 0x1F, 0xFF, 0xC0},  //  10
+  {0x00, 0x00, 0x1F, 0xFF, 0xC0},  //  11  head top
+  {0x00, 0x00, 0x1F, 0xFF, 0xC0},  //  12
+  {0x00, 0x00, 0x1F, 0xFF, 0xC0},  //  13
+  {0x00, 0x00, 0x1F, 0xFF, 0xE0},  //  14
+  {0x00, 0x00, 0x0F, 0xFF, 0xE0},  //  15
+  {0x00, 0x00, 0x07, 0xFF, 0xC0},  //  16
+  {0x00, 0x00, 0x07, 0xFF, 0xC0},  //  17
+  {0x00, 0x00, 0x07, 0xFF, 0xC0},  //  18
+  {0x00, 0x00, 0x03, 0xFF, 0xC0},  //  19
+  {0x00, 0x00, 0x01, 0xFE, 0x00},  //  20
+  {0x00, 0x00, 0xF7, 0xFF, 0x00},  //  21
+  {0x00, 0x61, 0xFF, 0xFF, 0x00},  //  22
+  {0x01, 0xFF, 0xFF, 0xFF, 0xD0},  //  23
+  {0x03, 0xFF, 0xFF, 0xFF, 0xFC},  //  24
+  {0x7F, 0xFF, 0xFF, 0xFF, 0xFE},  //  25
+  {0xFC, 0xFF, 0xFF, 0xFF, 0xFE},  //  26  ← FLUTE_ROW (widest arm)
+  {0xC1, 0xFF, 0xFF, 0xFF, 0xFE},  //  27
+  {0x00, 0xFF, 0xFF, 0xFF, 0xFE},  //  28
+  {0x00, 0xFF, 0xFF, 0xFF, 0xFC},  //  29
+  {0x00, 0x7F, 0xFF, 0xFF, 0xFC},  //  30
+  {0x00, 0x7F, 0xF7, 0xFF, 0xF8},  //  31  sash gap
+  {0x00, 0x7F, 0xEF, 0xFF, 0xF8},  //  32
+  {0x00, 0x7F, 0xFF, 0xFF, 0xF0},  //  33
+  {0x00, 0x3F, 0xFF, 0xFF, 0xE0},  //  34
+  {0x00, 0x3F, 0xEF, 0xFF, 0xE0},  //  35  waist
+  {0x00, 0x1F, 0xCF, 0xFF, 0xE0},  //  36
+  {0x00, 0x1F, 0x87, 0xFF, 0x80},  //  37
+  {0x00, 0x0F, 0x07, 0xFF, 0x00},  //  38
+  {0x00, 0x04, 0x0F, 0xFE, 0x80},  //  39
+  {0x00, 0x00, 0x0F, 0xF9, 0x80},  //  40
+  {0x00, 0x00, 0x0F, 0xF7, 0x80},  //  41
+  {0x00, 0x00, 0x0F, 0xCF, 0x00},  //  42
+  {0x00, 0x00, 0x0F, 0x3E, 0x00},  //  43
+  {0x00, 0x00, 0x1C, 0xFF, 0x00},  //  44
+  {0x00, 0x00, 0x19, 0xFF, 0x00},  //  45
+  {0x00, 0x00, 0x13, 0xFF, 0x80},  //  46
+  {0x00, 0x00, 0x07, 0xFF, 0x80},  //  47
+  {0x00, 0x00, 0x0F, 0xFF, 0x80},  //  48
+  {0x00, 0x00, 0x1F, 0xFF, 0x80},  //  49
+  {0x00, 0x00, 0x3F, 0xFF, 0x80},  //  50
+  {0x00, 0x00, 0x3F, 0xFF, 0xC0},  //  51
+  {0x00, 0x00, 0x5F, 0xFF, 0xC0},  //  52  dhoti upper
+  {0x00, 0x01, 0xBF, 0xFF, 0xC0},  //  53
+  {0x00, 0x01, 0x7F, 0xFF, 0xE0},  //  54
+  {0x00, 0x02, 0x7F, 0xFF, 0xE0},  //  55
+  {0x00, 0x06, 0xFF, 0xFF, 0xE0},  //  56
+  {0x00, 0x0E, 0xFF, 0xFF, 0xF0},  //  57
+  {0x00, 0x1E, 0xFF, 0xFF, 0xF0},  //  58
+  {0x00, 0x1D, 0xFF, 0xFF, 0xF0},  //  59
+  {0x00, 0x3D, 0xFF, 0xFF, 0xF0},  //  60
+  {0x00, 0x7D, 0xFF, 0xFF, 0xF8},  //  61
+  {0x00, 0xFD, 0xFF, 0xFF, 0xF8},  //  62
+  {0x00, 0xF9, 0xFF, 0xFF, 0xF8},  //  63  sash diagonal
+  {0x01, 0xF9, 0xFF, 0xFF, 0xF8},  //  64
+  {0x03, 0xF9, 0xFF, 0x7F, 0xF8},  //  65
+  {0x03, 0xF9, 0xFF, 0x7F, 0xFC},  //  66
+  {0x07, 0xF9, 0xFF, 0x7F, 0xFC},  //  67
+  {0x0F, 0xF9, 0xFF, 0x3F, 0xFC},  //  68
+  {0x0F, 0xF9, 0xFF, 0xBF, 0xFC},  //  69
+  {0x1F, 0xF9, 0xFF, 0xDF, 0xFC},  //  70  dhoti hem
+  {0x07, 0xF1, 0xFF, 0x5F, 0xFC},  //  71
+  {0x03, 0xF0, 0xFF, 0xCF, 0xFC},  //  72
+  {0x00, 0xF0, 0xFF, 0xEF, 0xFC},  //  73
+  {0x00, 0x70, 0xFF, 0xF7, 0xFC},  //  74
+  {0x00, 0xF0, 0xFF, 0xF3, 0xFC},  //  75
+  {0x00, 0x78, 0xFF, 0xF9, 0xFC},  //  76
+  {0x00, 0x10, 0x7E, 0xFD, 0xFC},  //  77
+  {0x00, 0x00, 0x7E, 0xFE, 0xFC},  //  78  upper shin
+  {0x00, 0x00, 0x3E, 0xFF, 0x3C},  //  79
+  {0x00, 0x00, 0x3E, 0xFF, 0x88},  //  80
+  {0x00, 0x00, 0x3E, 0xFF, 0xC0},  //  81
+  {0x00, 0x00, 0x1E, 0xFF, 0xE0},  //  82
+  {0x00, 0x00, 0x1F, 0xFF, 0xF8},  //  83
+  {0x00, 0x00, 0x0F, 0xFF, 0xF8},  //  84
+  {0x00, 0x00, 0x0F, 0xFF, 0xF8},  //  85
+  {0x00, 0x00, 0x03, 0xFF, 0xF0},  //  86  ankle
+  {0x00, 0x00, 0x01, 0xFF, 0xE0},  //  87
+  {0x00, 0x00, 0x00, 0xFF, 0xC0},  //  88
+  {0x00, 0x00, 0x00, 0xFF, 0xC0},  //  89
+  {0x00, 0x00, 0x00, 0x7F, 0x80},  //  90
+  {0x00, 0x00, 0x00, 0xFF, 0x80},  //  91
+  {0x00, 0x00, 0x00, 0xFF, 0x00},  //  92
+  {0x00, 0x00, 0x00, 0x7C, 0x00},  //  93
+  {0x00, 0x00, 0x00, 0x7C, 0x00},  //  94
+  {0x00, 0x00, 0x00, 0x7C, 0x00},  //  95
+  {0x00, 0x00, 0x00, 0xFC, 0x00},  //  96  foot
+  {0x00, 0x00, 0x00, 0xFC, 0x00},  //  97
+  {0x00, 0x00, 0x00, 0xFC, 0x00},  //  98
+  {0x00, 0x00, 0x01, 0xFC, 0x00},  //  99
+  {0x00, 0x00, 0x01, 0xFC, 0x00},  // 100
+  {0x00, 0x00, 0x03, 0xFC, 0x00},  // 101
+  {0x00, 0x00, 0x07, 0xFE, 0x00},  // 102
+  {0x00, 0x00, 0x0F, 0xFE, 0x00},  // 103
+  {0x00, 0x00, 0x07, 0x3F, 0x00},  // 104
+  {0x00, 0x00, 0x00, 0x7F, 0x80},  // 105
+  {0x00, 0x00, 0x00, 0x3F, 0x00},  // 106  toe tip
+};
+
+// ═══════════════════════════════════════════════════════════════
+//  ANIMATION CONSTANTS
+// ═══════════════════════════════════════════════════════════════
+
+// Layer 1 — body horizontal sway
+//   Amplitude 2.2 px keeps the integer steps sparse (fewer snaps per cycle)
+//   vs 2.5 which steps more often and feels less smooth.
+static const float BODY_AMP    = 2.2f;   // peak px
+static const float BODY_PERIOD = 3.2f;   // seconds
+
+// Layer 2 — feather micro-sway
+//   Blended as an additive leverage multiplier, NOT a separate integer step.
+//   Net feather amp = BODY_AMP + FEATHER_EXTRA at the very tip.
+//   Single lroundf() at the end → no independent feather snapping.
+static const float FEATHER_EXTRA  = 0.6f;  // extra px amplitude at tip only
+static const float FEATHER_PERIOD = 2.1f;
+static const int   FEATHER_ROWS   = 8;     // rows from tip that blend the extra
+
+// Layer 3 — flute sparkle
+static const int   FLUTE_ROW     = 26;
+static const float SHIMMER_PERIOD = 0.9f;
+static const float SHIMMER_THRESH = 0.6f;  // raised slightly → shorter duty
+
+// Layout on 64×128 canvas
+static const int BASE_X = (CANVAS_W - BMP_W) / 2;  // 12
+static const int BASE_Y = (CANVAS_H - BMP_H) / 2;  // 10
+
+#ifndef TWO_PI
+  #define TWO_PI 6.28318530718f
+#endif
+
+// ═══════════════════════════════════════════════════════════════
+//  ANIMATION STATE
+// ═══════════════════════════════════════════════════════════════
+static float    bodyPhase    = 0.0f;
+static float    featherPhase = 0.94f;  // natural counter-phase pre-seed
+static float    shimmerPhase = 0.0f;
+static uint32_t prevFrameUs  = 0;
+
+// ═══════════════════════════════════════════════════════════════
+//  RENDERING
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Draw one PROGMEM bitmap row at display position (originX + xShift, rowY).
+ * Unsigned cast on bounds checks: single compare covers both <0 and >=limit.
+ */
+static inline void drawRow(int originX, int rowY, int row, int xShift) {
+  if ((unsigned)rowY >= (unsigned)CANVAS_H) return;
+  const int x0 = originX + xShift;
+  for (int col = 0; col < BMP_W; col++) {
+    if (pgm_read_byte(&krishna_bmp[row][col >> 3]) & (0x80 >> (col & 7))) {
+      const unsigned px = (unsigned)(x0 + col);
+      if (px < (unsigned)CANVAS_W)
+        oled.drawPixel((int)px, rowY, SSD1306_WHITE);
+    }
+  }
+}
+
+/**
+ * Render full frame.
+ *
+ * bodySin    — sinf(bodyPhase),    pre-computed
+ * featherSin — sinf(featherPhase), pre-computed
+ * shimmerOn  — true → draw sparkle at flute tip
+ */
+static void renderKrishna(float bodySin, float featherSin, bool shimmerOn) {
+  oled.clearDisplay();
+
+  // Pre-compute the per-row reciprocal once
+  const float invBmpH1 = 1.0f / (float)(BMP_H - 1);
+
+  for (int row = 0; row < BMP_H; row++) {
+    // Leverage: 1.0 at tip → 0.0 at base  (pivot-at-foot model)
+    const float lev = 1.0f - (float)row * invBmpH1;
+
+    // Base contribution from body sway
+    float sway = bodySin * BODY_AMP * lev;
+
+    // Feather rows: blend in extra micro-sway additively in float space
+    // — avoids a separate integer snap
+    if (row < FEATHER_ROWS) {
+      const float fBlend = 1.0f - (float)row * (1.0f / (float)FEATHER_ROWS);
+      sway += featherSin * FEATHER_EXTRA * fBlend;
+    }
+
+    // ONE clean integer round at the very end — no truncation asymmetry,
+    // no per-frame dithering (those were the stutter sources in v3.0).
+    const int xShift = (int)lroundf(sway);
+
+    drawRow(BASE_X, BASE_Y + row, row, xShift);
+  }
+
+  // Flute-tip sparkle
+  if (shimmerOn) {
+    const float lev  = 1.0f - (float)FLUTE_ROW * invBmpH1;
+    const int   sOff = (int)lroundf(bodySin * BODY_AMP * lev);
+    const int   spkX = BASE_X + sOff - 2;
+    const int   spkY = BASE_Y + FLUTE_ROW;
+    if ((unsigned)spkY < (unsigned)CANVAS_H) {
+      if ((unsigned)spkX       < (unsigned)CANVAS_W) oled.drawPixel(spkX,     spkY,     SSD1306_WHITE);
+      if ((unsigned)(spkX + 1) < (unsigned)CANVAS_W) oled.drawPixel(spkX + 1, spkY,     SSD1306_WHITE);
+      if ((unsigned)spkY + 1   < (unsigned)CANVAS_H) oled.drawPixel(spkX,     spkY + 1, SSD1306_WHITE);
+    }
+  }
+
+  // Push to display immediately — minimises blank-screen gap
+  oled.display();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SETUP
+// ═══════════════════════════════════════════════════════════════
+void setup() {
+  Wire.begin(21, 22);
+  Wire.setClock(I2C_FREQ);   // 400 kHz — essential, unlocks ~50 FPS
+
+  if (!oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    for (;;) delay(1000);    // halt silently on init failure
+  }
+
+  // Portrait: 128-px long axis becomes vertical.
+  // Swap to setRotation(3) if figure appears upside-down.
+  oled.setRotation(1);
+  oled.clearDisplay();
+  oled.display();
+  delay(80);
+
+  prevFrameUs = micros();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  LOOP — time-based, spin-wait, no delay(), delta-independent
+// ═══════════════════════════════════════════════════════════════
+void loop() {
+  const uint32_t now     = micros();
+  const uint32_t elapsed = now - prevFrameUs;
+  if (elapsed < FRAME_US) return;   // spin — tightest possible frame gate
+  prevFrameUs = now;
+
+  // Delta time in seconds, capped at 3× target frame to absorb I²C stalls
+  float dt = (float)elapsed * 1e-6f;
+  const float DT_MAX = (float)FRAME_US * 3e-6f;
+  if (dt > DT_MAX) dt = DT_MAX;
+
+  // ── Advance phases (radians per second × dt) ─────────────────────────────
+  bodyPhase    += dt * (TWO_PI / BODY_PERIOD);
+  featherPhase += dt * (TWO_PI / FEATHER_PERIOD);
+  shimmerPhase += dt * (TWO_PI / SHIMMER_PERIOD);
+
+  // Wrap to [0, 2π) — prevents float precision erosion over long sessions
+  if (bodyPhase    >= TWO_PI) bodyPhase    -= TWO_PI;
+  if (featherPhase >= TWO_PI) featherPhase -= TWO_PI;
+  if (shimmerPhase >= TWO_PI) shimmerPhase -= TWO_PI;
+
+  // ── Evaluate ─────────────────────────────────────────────────────────────
+  // Compute both sines once — used 107 times each in the render loop
+  const float bodySin    = sinf(bodyPhase);
+  const float featherSin = sinf(featherPhase);
+  const bool  shimmerOn  = (sinf(shimmerPhase) > SHIMMER_THRESH);
+
+  // ── Render ───────────────────────────────────────────────────────────────
+  renderKrishna(bodySin, featherSin, shimmerOn);
+}
