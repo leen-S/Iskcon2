@@ -1,5 +1,5 @@
 /**
- * chant.cpp  —  Chant Screen implementation
+ * chant.cpp  —  Japa Counter  v6.0
  */
 
 #include "chant.h"
@@ -13,8 +13,7 @@ void chantEnter() {
 }
 
 void chantUpdate(bool shortPress, bool longPress) {
-    (void)longPress;  // screen transition handled by ui.cpp
-
+    (void)longPress;
     switch (chantState) {
         case CHANT_IDLE:
             if (shortPress) {
@@ -23,7 +22,6 @@ void chantUpdate(bool shortPress, bool longPress) {
                 if (chantCount >= CHANT_TARGET) chantState = CHANT_COMPLETE;
             }
             break;
-
         case CHANT_COUNTING:
             if (shortPress) {
                 chantCount++;
@@ -33,22 +31,19 @@ void chantUpdate(bool shortPress, bool longPress) {
                 }
             }
             break;
-
         case CHANT_COMPLETE:
-            break;  // locked
+            break;
     }
 }
 
-// ── Render helpers ───────────────────────────────────────────────
-
-static void drawCentred(const char *str, uint8_t textSize, int8_t offsetY = 0) {
+static void drawCentred(const char *str, uint8_t textSize, int8_t offsetY) {
     oled.setTextSize(textSize);
     oled.setTextWrap(false);
     oled.setTextColor(SSD1306_WHITE);
     const int16_t charW = 6 * textSize;
     const int16_t charH = 8 * textSize;
     const int16_t strW  = (int16_t)(strlen(str) * charW);
-    const int16_t x     = (CANVAS_W - strW) / 2;
+    const int16_t x     = max((int16_t)0, (int16_t)((CANVAS_W - strW) / 2));
     const int16_t y     = (CANVAS_H - charH) / 2 + offsetY;
     oled.setCursor(x, y);
     oled.print(str);
@@ -66,18 +61,13 @@ static void drawProgressBar() {
 
 void renderChant() {
     switch (chantState) {
-
         case CHANT_IDLE:
             drawCentred("Let's Go", 1, -8);
             oled.setTextSize(1);
             oled.setTextColor(SSD1306_WHITE);
             oled.setCursor(8, (CANVAS_H / 2) + 6);
-            oled.print(F("press to begin"));
-            {
-                const uint8_t margin  = 8;
-                const uint8_t barMaxW = CANVAS_W - (margin * 2);
-                oled.drawRect(margin, 100, barMaxW, 4, SSD1306_WHITE);
-            }
+            oled.print(F("tap to begin"));
+            oled.drawRect(8, 100, CANVAS_W - 16, 4, SSD1306_WHITE);
             break;
 
         case CHANT_COUNTING: {
@@ -99,12 +89,7 @@ void renderChant() {
             oled.setCursor((CANVAS_W - 18) / 2, 18);
             oled.print(F("108"));
             drawCentred("Hari Bol", 1, 0);
-            {
-                const uint8_t margin  = 8;
-                const uint8_t barMaxW = CANVAS_W - (margin * 2);
-                oled.fillRect(margin, 100, barMaxW, 4, SSD1306_WHITE);
-            }
-            oled.setTextSize(1);
+            oled.fillRect(8, 100, CANVAS_W - 16, 4, SSD1306_WHITE);
             oled.setCursor(4, CANVAS_H - 10);
             oled.print(F("hold: back"));
             break;

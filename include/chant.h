@@ -1,11 +1,6 @@
 #pragma once
 /**
- * ╔══════════════════════════════════════════════════════════════════════════╗
- *  chant.h  —  Chant Screen (SCREEN_CHANT)
- *
- *  FLOW:  CHANT_IDLE → short press → CHANT_COUNTING → 108 → CHANT_COMPLETE
- *  Exit:  Long press at any state → SCREEN_MENU (handled in ui.cpp)
- * ╚══════════════════════════════════════════════════════════════════════════╝
+ * chant.h  —  Japa Counter Screen  v6.0
  */
 
 #include <Arduino.h>
@@ -23,9 +18,9 @@ extern Adafruit_SSD1306 oled;
 static const uint16_t CHANT_TARGET = 108;
 
 enum ChantState : uint8_t {
-    CHANT_IDLE      = 0,
-    CHANT_COUNTING  = 1,
-    CHANT_COMPLETE  = 2
+    CHANT_IDLE     = 0,
+    CHANT_COUNTING = 1,
+    CHANT_COMPLETE = 2
 };
 
 extern ChantState chantState;
