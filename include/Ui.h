@@ -32,7 +32,7 @@ extern Adafruit_SSD1306 oled;
 #endif
 
 // ── Button pin ──────────────────────────────────────────────────
-#define BTN_PIN  0    // GPIO0 — built-in BOOT button on most DevKits
+#define BTN_PIN  4    // GPIO0 — built-in BOOT button on most DevKits
                       // Wiring: GPIO0 → button → GND  (active-LOW)
                       // Internal pull-up via pinMode(BTN_PIN, INPUT_PULLUP)
 
