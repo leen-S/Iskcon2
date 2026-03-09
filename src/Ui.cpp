@@ -1,9 +1,11 @@
 /**
- * ui.cpp  —  Screen State Machine + Button Handler  v9.0
+ * ui.cpp  —  Screen State Machine + Button Handler  v10.0
  *
- *  Reverted from v8.0: SCREEN_OFF, EVT_SLEEP, enterDeepSleep(),
- *  BTN_SLEEP_MS, BTN_GPIO_NUM, esp_sleep includes all removed.
- *  Button: active-LOW, GPIO0, INPUT_PULLUP.
+ *  v10.0: SCREEN_TIME added.
+ *  Rotation is managed here at state transitions:
+ *    → SCREEN_TIME entry:  oled.setRotation(0)  landscape
+ *    ← SCREEN_TIME exit:   oled.setRotation(1)  portrait
+ *  renderTimeScreen() itself never touches rotation.
  */
 
 #include "Ui.h"
@@ -33,11 +35,8 @@ static bool      s_longFired  = false;
 enum BtnEvent : uint8_t { EVT_NONE, EVT_SHORT, EVT_LONG };
 
 // ── pollButton ───────────────────────────────────────────────────
-// Non-blocking. Call every loop() iteration (before frame gate).
-// Returns EVT_SHORT on clean release under threshold.
-// Returns EVT_LONG exactly once when held >= BTN_LONGPRESS_MS.
 static BtnEvent pollButton() {
-    const bool     rawLow = (digitalRead(BTN_PIN) == LOW);  // active-LOW
+    const bool     rawLow = (digitalRead(BTN_PIN) == LOW);
     const uint32_t now    = millis();
 
     switch (s_btnPhase) {
@@ -52,7 +51,6 @@ static BtnEvent pollButton() {
 
         case BTN_PRESS_PENDING:
             if (!rawLow) {
-                // Released before debounce — discard noise
                 s_btnPhase = BTN_IDLE;
             } else if (now - s_btnTimerMs >= BTN_DEBOUNCE_MS) {
                 s_btnPhase = BTN_PRESSED;
@@ -62,7 +60,7 @@ static BtnEvent pollButton() {
         case BTN_PRESSED:
             if (!s_longFired && (now - s_btnTimerMs >= BTN_LONGPRESS_MS)) {
                 s_longFired = true;
-                return EVT_LONG;    // fires immediately at threshold
+                return EVT_LONG;
             }
             if (!rawLow) {
                 s_btnPhase   = BTN_RELEASE_PENDING;
@@ -72,7 +70,6 @@ static BtnEvent pollButton() {
 
         case BTN_RELEASE_PENDING:
             if (rawLow) {
-                // Bounced — back to pressed
                 s_btnPhase = BTN_PRESSED;
             } else if (now - s_btnTimerMs >= BTN_DEBOUNCE_MS) {
                 s_btnPhase = BTN_IDLE;
@@ -83,18 +80,28 @@ static BtnEvent pollButton() {
     return EVT_NONE;
 }
 
+// ── Rotation helpers ─────────────────────────────────────────────
+// Called exactly once per transition — not every frame.
+static void enterLandscape() {
+    oled.setRotation(0);   // 128 wide × 64 tall
+    oled.clearDisplay();   // flush portrait buffer — prevents artifact bleed
+}
+
+static void exitLandscape() {
+    oled.setRotation(1);   // 64 wide × 128 tall  (portrait default)
+    oled.clearDisplay();   // flush landscape buffer
+}
+
 // ── handleEvent ──────────────────────────────────────────────────
 static void handleEvent(BtnEvent evt) {
     if (evt == EVT_NONE) return;
 
-    // Expose flags so sub-screens (chant) can consume the same event
     if (evt == EVT_SHORT) buttonShortPress = true;
     if (evt == EVT_LONG)  buttonLongPress  = true;
 
     switch (s_screen) {
 
         case SCREEN_BOOT:
-            // Any press skips boot sequence → HOME
             if (evt == EVT_SHORT || evt == EVT_LONG) {
                 s_screen = SCREEN_HOME;
             }
@@ -105,39 +112,46 @@ static void handleEvent(BtnEvent evt) {
                 s_screen  = SCREEN_MENU;
                 s_menuSel = 0;
             }
-            // Long press on HOME: no-op (reserved for future use)
             break;
 
         case SCREEN_MENU:
             if (evt == EVT_SHORT) {
-                // Cycle selection downward, wrap around
                 s_menuSel = (s_menuSel + 1) % MENU_ITEM_COUNT;
             } else if (evt == EVT_LONG) {
-                // Select highlighted item
                 ScreenState target = MENU_TARGETS[s_menuSel];
+                // Sub-screen entry setup
                 if (target == SCREEN_CHANT)  chantEnter();
                 if (target == SCREEN_STREAK) streakEnter();
+                if (target == SCREEN_TIME)   enterLandscape();
                 s_screen = target;
                 if (s_screen == SCREEN_HOME) s_menuSel = 0;
             }
             break;
 
         case SCREEN_CHANT:
-            // Short press forwarded via buttonShortPress to chantUpdate()
-            // in loop() — no routing needed here.
+            // Short press handled via buttonShortPress in loop()
             if (evt == EVT_LONG) {
                 s_screen  = SCREEN_MENU;
-                s_menuSel = 1;    // re-highlight "Chant" on return
+                s_menuSel = 1;
             }
             break;
 
         case SCREEN_STREAK:
             if (evt == EVT_SHORT) {
                 s_screen  = SCREEN_MENU;
-                s_menuSel = 2;    // re-highlight "Streak" on return
+                s_menuSel = 2;
             } else if (evt == EVT_LONG) {
                 s_screen  = SCREEN_HOME;
                 s_menuSel = 0;
+            }
+            break;
+
+        case SCREEN_TIME:
+            // Short press: no-op
+            if (evt == EVT_LONG) {
+                exitLandscape();          // restore portrait before menu draws
+                s_screen  = SCREEN_MENU;
+                s_menuSel = 3;            // re-highlight "Time" in menu
             }
             break;
     }
@@ -145,7 +159,7 @@ static void handleEvent(BtnEvent evt) {
 
 // ── Public API ───────────────────────────────────────────────────
 void uiInit() {
-    pinMode(BTN_PIN, INPUT_PULLUP);   // active-LOW; internal pull-up
+    pinMode(BTN_PIN, INPUT_PULLUP);
     s_screen    = SCREEN_BOOT;
     s_menuSel   = 0;
     s_btnPhase  = BTN_IDLE;
@@ -153,7 +167,7 @@ void uiInit() {
 }
 
 ScreenState uiUpdate() {
-    buttonShortPress = false;         // clear flags each frame
+    buttonShortPress = false;
     buttonLongPress  = false;
     handleEvent(pollButton());
     return s_screen;
@@ -167,12 +181,14 @@ void uiSetScreen(ScreenState s) {
     s_screen = s;
 }
 
-// ── Menu layout constants ────────────────────────────────────────
-static const uint8_t MENU_ROW_H     = 16;
-static const uint8_t MENU_PADDING_X = 10;
+// ── Menu layout ──────────────────────────────────────────────────
+// Portrait canvas: 64 wide × 128 tall.
+// 4 items × 16px rows = 64px total menu height.
+static const uint8_t MENU_ROW_H     = 14;   // slightly tighter for 4 items
+static const uint8_t MENU_PADDING_X =  8;
 static const uint8_t MENU_RECT_W    = CANVAS_W - (MENU_PADDING_X * 2);
-static const uint8_t MENU_RECT_H    = 13;
-static const uint8_t MENU_TEXT_OFFY =  3;
+static const uint8_t MENU_RECT_H    = 11;
+static const uint8_t MENU_TEXT_OFFY =  2;
 static const uint8_t MENU_TOTAL_H   = MENU_ITEM_COUNT * MENU_ROW_H;
 static const uint8_t MENU_ORIGIN_Y  = (CANVAS_H - MENU_TOTAL_H) / 2;
 static const uint8_t TITLE_Y        = 4;
@@ -194,7 +210,7 @@ void renderMenu() {
         } else {
             oled.setTextColor(SSD1306_WHITE);
         }
-        oled.setCursor(MENU_PADDING_X + 4, rectY + MENU_TEXT_OFFY);
+        oled.setCursor(MENU_PADDING_X + 3, rectY + MENU_TEXT_OFFY);
         oled.print(MENU_LABELS[i]);
     }
 

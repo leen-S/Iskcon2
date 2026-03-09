@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "ElectricSheer",
+			"path": "../ElectricSheer"
+		}
+	],
+	"settings": {}
+}

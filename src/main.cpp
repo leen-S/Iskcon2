@@ -1,6 +1,6 @@
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
- *  Krishna Muralidhara  v9.0  —  PlatformIO / ESP32
+ *  Krishna Muralidhara  v10.0  —  PlatformIO / ESP32
  *
  *  SCREENS
  *  ────────
@@ -9,6 +9,7 @@
  *  SCREEN_MENU   → 3-item button menu
  *  SCREEN_CHANT  → Japa counter 1–108
  *  SCREEN_STREAK → Persistent session streak (Preferences/NVS)
+ *  SCREEN_TIME   → Landscape RTC clock (DS3231)
  *
  *  ──────
  *
@@ -32,6 +33,7 @@
 #include "chant.h"
 #include "streak.h"
 #include "leaf_breeze.h"
+#include "time_screen.h"
 
 // ═══════════════════════════════════════════════════════════════
 //  HARDWARE
@@ -216,6 +218,7 @@ void setup() {
 
     // ── 6. Persistent data ───────────────────────────────────────
     streakInit();
+    timeScreenInit();   // DS3231 RTC — safe to call even if module missing
 
     // ── 7. Subsystem init ────────────────────────────────────────
     initLeaves();
@@ -304,6 +307,12 @@ void loop() {
 
         case SCREEN_STREAK:
             renderStreak();
+            break;
+
+        case SCREEN_TIME:
+            // Display is already in landscape (setRotation(0)),
+            // switched by ui.cpp at transition — not every frame.
+            renderTimeScreen();
             break;
     }
 
