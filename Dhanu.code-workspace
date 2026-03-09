@@ -4,8 +4,8 @@
 			"path": "."
 		},
 		{
-			"name": "ElectricSheer",
-			"path": "../ElectricSheer"
+			"name": "TESTRTC",
+			"path": "../TESTRTC"
 		}
 	],
 	"settings": {}

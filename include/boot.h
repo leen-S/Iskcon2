@@ -46,4 +46,4 @@ enum BootState : uint8_t {
 
 void bootInit();
 bool bootUpdate(float dt);
-void renderBoot();
+void renderBoot();    
